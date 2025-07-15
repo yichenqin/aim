@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Result - Shoot Angle</title>
+</head>
+<body>
+    <h1>Shoot Angle: {{ angle | round(1) }}°</h1>
+    <img src="{{ url_for('send_image', filename=image_file) }}" alt="Labeled Image" />
+    <br/>
+    <a href="/">Try Another Image</a>
+</body>
+</html>
