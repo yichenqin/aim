@@ -6,6 +6,16 @@ from app import app
 
 
 class HostingTests(unittest.TestCase):
+    def test_opening_upload_link_returns_to_form(self):
+        client = app.test_client()
+        response = client.get('/upload')
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers['Location'], '/')
+        response = client.get('/upload', follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'Pool Shot Assistant', response.data)
+        self.assertEqual(client.post('/upload').status_code, 400)
+
     def test_health_check(self):
         response = app.test_client().get('/healthz')
         self.assertEqual(response.status_code, 200)

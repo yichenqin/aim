@@ -24,7 +24,8 @@
 <body>
     <main>
     <h1>Pool Shot Assistant</h1>
-    <form action="/upload" method="post" enctype="multipart/form-data">
+    <p class="hint">by YQ</p>
+    <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
         <label for="image">upload a pool table image</label>
         <input id="image" type="file" name="image" accept="image/*" aria-describedby="upload-hint" required />
         <p class="hint" id="upload-hint">Choose a photo showing the whole playing surface and all four rails. Maximum upload size: 20 MB.</p>

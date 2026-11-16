@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template, send_from_directory, abort
+from flask import Flask, request, render_template, send_from_directory, abort, redirect, url_for
 import cv2
 import numpy as np
 import math
@@ -683,6 +683,12 @@ def calculate_angle(p1, p2):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.get('/upload')
+def upload_page():
+    # Opening or sharing a results-page URL sends GET, not a file upload.
+    return redirect(url_for('index'))
+
 
 @app.route('/upload', methods=['POST'])
 def upload():
