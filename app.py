@@ -23,6 +23,156 @@ def health():
 def upload_too_large(error):
     return 'Image too large. Please upload an image smaller than 20 MB.', 413
 
+def find_playing_surface(image):
+    """Find a uniform felt region supported by four visible straight edges.
+
+    No ball location is used. Opposite rails may converge under perspective.
+    Failure never returns an unrestricted whole-image mask.
+    """
+    scale = min(1.0, 600 / max(image.shape[:2]))
+    small = cv2.resize(image, None, fx=scale, fy=scale)
+    height, width = small.shape[:2]
+    lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB).astype(np.float32)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 10, 35)
+    edge_distance = cv2.distanceTransform(255 - edges, cv2.DIST_L2, 3)
+    best = None
+    seen = set()
+    for fy in (0.35, 0.48, 0.61, 0.74):
+        for fx in (0.25, 0.42, 0.58, 0.75):
+            x, y = int(width * fx), int(height * fy)
+            color = np.median(lab[max(0, y-3):y+4, max(0, x-3):x+4], axis=(0, 1))
+            for tolerance in (22, 35):
+                mask = (np.linalg.norm(lab - color, axis=2) < tolerance).astype(np.uint8) * 255
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for contour in contours:
+                    if cv2.contourArea(contour) < height * width * 0.14:
+                        continue
+                    hull = cv2.convexHull(contour)
+                    perimeter = cv2.arcLength(hull, True)
+                    for epsilon in (0.012, 0.02, 0.03, 0.045, 0.065):
+                        quad = cv2.approxPolyDP(hull, epsilon * perimeter, True)
+                        if len(quad) != 4 or not cv2.isContourConvex(quad):
+                            continue
+                        corners = quad[:, 0].astype(float)
+                        key = tuple(np.round(corners.flatten() / 4).astype(int))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        area = cv2.contourArea(quad) / (height * width)
+                        if not 0.16 < area < 0.88:
+                            continue
+                        if np.any(corners[:, 0] < 3) or np.any(corners[:, 0] > width - 4) or np.any(corners[:, 1] < 3) or np.any(corners[:, 1] > height - 4):
+                            continue
+                        vectors = np.roll(corners, -1, axis=0) - corners
+                        lengths = np.linalg.norm(vectors, axis=1)
+                        if lengths.min() < min(width, height) * 0.13:
+                            continue
+                        units = vectors / lengths[:, None]
+                        # Broad tolerance for photographed parallel physical rails.
+                        if any(abs(np.dot(units[i], units[i+2])) < 0.35 for i in (0, 1)):
+                            continue
+                        if any(abs(np.dot(units[i], units[(i+1) % 4])) > 0.94 for i in range(4)):
+                            continue
+                        support = []
+                        for i in range(4):
+                            points = corners[i] + np.linspace(0.1, 0.9, 60)[:, None] * vectors[i]
+                            pixels = np.round(points).astype(int)
+                            support.append(np.mean(edge_distance[pixels[:, 1], pixels[:, 0]] < 4))
+                        if min(support) < 0.35:
+                            continue
+                        polygon = np.zeros(gray.shape, np.uint8)
+                        cv2.fillConvexPoly(polygon, quad, 255)
+                        interior = cv2.erode(polygon, np.ones((11, 11), np.uint8)) > 0
+                        coverage = float(np.mean(mask[interior] > 0))
+                        if coverage < 0.78:
+                            continue
+                        score = area + 0.45 * coverage + 0.3 * np.mean(support)
+                        if best is None or score > best[0]:
+                            best = (score, polygon)
+    if best is None:
+        raise ValueError('Could not identify four rails around the playing surface. Please use a photo showing the entire table.')
+    mask = cv2.resize(best[1], (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+    rails = detect_rails(mask, 1.0, image)
+    if len(rails) != 4:
+        raise ValueError('Could not fit four reliable table rails. Please try another photo.')
+    result = np.zeros(image.shape[:2], np.uint8)
+    cv2.fillConvexPoly(result, np.round(rails).astype(np.int32), 255)
+    return result
+
+
+def ball_inside_surface(interior_distance, circle):
+    """Allow small rail-fit errors for touching balls; centers stay on felt."""
+    x, y, radius = map(float, circle)
+    ix, iy = round(x), round(y)
+    if not (0 <= iy < interior_distance.shape[0] and 0 <= ix < interior_distance.shape[1]):
+        return False
+    distance = interior_distance[iy, ix]
+    return bool(distance > 0 and distance >= max(1, radius - max(2, radius * 0.2)))
+
+
+def ball_appearance_supported(lab, table, circle, felt_chroma=None):
+    """Reject circle votes on plain felt or partial cushion/shadow edges."""
+    x, y, radius = map(float, circle)
+    angles = np.linspace(0, 2 * math.pi, 64, endpoint=False)
+    directions = np.column_stack((np.cos(angles), np.sin(angles)))
+
+    def sample(factor):
+        points = np.array([x, y]) + directions * radius * factor
+        return cv2.remap(lab, points[:, 0].astype(np.float32)[None],
+                         points[:, 1].astype(np.float32)[None], cv2.INTER_LINEAR)[0].astype(float)
+
+    outer_points = np.round(np.array([x, y]) + directions * radius * 1.4).astype(int)
+    valid = ((outer_points[:, 0] >= 0) & (outer_points[:, 0] < table.shape[1])
+             & (outer_points[:, 1] >= 0) & (outer_points[:, 1] < table.shape[0]))
+    indices = np.flatnonzero(valid)
+    valid[indices] &= table[outer_points[indices, 1], outer_points[indices, 0]] > 0
+    if np.count_nonzero(valid) < 24:
+        return False
+    # Check the candidate's own center, independently of nearby ball edges.
+    # Cast shadows largely preserve the felt's chroma and only darken it.
+    ring_samples = []
+    for factor in (1.6, 2.0, 2.4):
+        points = np.round(np.array([x, y]) + directions * radius * factor).astype(int)
+        usable = ((points[:, 0] >= 0) & (points[:, 0] < table.shape[1])
+                  & (points[:, 1] >= 0) & (points[:, 1] < table.shape[0]))
+        indices = np.flatnonzero(usable)
+        usable[indices] &= table[points[indices, 1], points[indices, 0]] > 0
+        ring_samples.extend(sample(factor)[usable])
+    if len(ring_samples) < 24:
+        return False
+    felt = np.median(ring_samples, axis=0)
+    gx, gy = np.meshgrid(np.linspace(-0.4, 0.4, 9), np.linspace(-0.4, 0.4, 9))
+    core_mask = gx ** 2 + gy ** 2 <= 0.4 ** 2
+    core = cv2.remap(lab, (x + gx * radius).astype(np.float32),
+                     (y + gy * radius).astype(np.float32), cv2.INTER_LINEAR)[core_mask].astype(float)
+    # Nearby colored balls can contaminate the local ring. Use the broad felt
+    # region for fabric color, while keeping local brightness for lighting.
+    if felt_chroma is None:
+        felt_chroma = np.median(lab[table > 0][::16, 1:], axis=0)
+    chroma = np.linalg.norm(core[:, 1:] - felt_chroma, axis=1)
+    foreground = ((chroma > 12) | (core[:, 0] > felt[0] + 12)
+                  | (core[:, 0] < felt[0] * 0.4))
+    if np.mean(foreground) < 0.5:
+        return False
+    inside, outside = sample(0.65), sample(1.4)
+    contrast = np.linalg.norm(inside - outside, axis=1)
+    if np.mean(contrast[valid] > 16) < 0.55:
+        return False
+    # Permit imperfect Hough radii, but require a localized boundary in
+    # several directions instead of an arc along just one shadow or rail.
+    boundary = np.zeros(len(angles))
+    for factor in (0.8, 1.0, 1.2):
+        change = np.linalg.norm(sample(factor - 0.12) - sample(factor + 0.12), axis=1)
+        boundary = np.maximum(boundary, change)
+    supported = valid & (contrast > 16) & (boundary > 12)
+    visible_sectors = sum(np.any(part) for part in np.array_split(valid, 4))
+    return bool(np.mean(supported[valid]) >= 0.5
+                and sum(np.any(part) for part in np.array_split(supported, 4))
+                >= min(3, visible_sectors))
+
+
 def detect_balls(image_path, return_table=False):
     img = cv2.imread(image_path)
     if img is None:
@@ -31,25 +181,23 @@ def detect_balls(image_path, return_table=False):
     scale = min(1.0, 1200 / max(img.shape[:2]))
     working = cv2.resize(img, None, fx=scale, fy=scale)
     hsv = cv2.cvtColor(working, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(working, cv2.COLOR_BGR2LAB)
     gray = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY)
     height, width = gray.shape
     min_radius = max(3, int(min(height, width) * 0.006))
     max_radius = max(min_radius + 2, int(min(height, width) * 0.065))
 
-    # Restrict candidates to the largest green/blue felt region when available.
-    felt = cv2.inRange(hsv, np.array([30, 55, 35]), np.array([130, 255, 255]))
-    contours, _ = cv2.findContours(felt, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    table = np.full(gray.shape, 255, dtype=np.uint8)
-    if contours:
-        largest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest) > gray.size * 0.1:
-            table[:] = 0
-            cv2.fillConvexPoly(table, cv2.convexHull(largest), 255)
+    # Establish four rails before looking for any ball, including the cue ball.
+    table = find_playing_surface(working)
+    interior_distance = cv2.distanceTransform(table, cv2.DIST_L2, 5)
+    felt_chroma = np.median(lab[table > 0][::16, 1:], axis=0)
 
     # White, low-saturation regions identify cue-ball candidates independently
     # of Hough's circle ordering. Allow off-white pixels and shaded balls.
     white = cv2.inRange(hsv, np.array([0, 0, 195]), np.array([179, 100, 255]))
-    white = cv2.bitwise_and(white, table)
+    # Preserve a few pixels of a touching cue ball when the fitted lip is inset.
+    cue_search = cv2.dilate(table, np.ones((5, 5), np.uint8))
+    white = cv2.bitwise_and(white, cue_search)
     white = cv2.morphologyEx(white, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     contours, _ = cv2.findContours(white, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     candidates = []
@@ -63,6 +211,8 @@ def detect_balls(image_path, return_table=False):
         fullness = area / (math.pi * radius ** 2)
         if circularity < 0.65 or fullness < 0.65:
             continue
+        if not ball_inside_surface(interior_distance, (x, y, radius)):
+            continue
         # A striped ball may have a large white patch; prefer white covering
         # the entire disk rather than just its brightest patch.
         disk = np.zeros(gray.shape, dtype=np.uint8)
@@ -75,27 +225,11 @@ def detect_balls(image_path, return_table=False):
         raise ValueError("Could not identify a white cue ball. Try a clearer, well-lit photo of the table.")
     cue = max(candidates, key=lambda candidate: candidate[0])[1]
 
-    # For neutral felt, estimate its color from a ring around the cue ball.
-    # Keeping detections inside the felt avoids circles on furniture and rails.
-    if np.all(table == 255):
-        lab = cv2.cvtColor(working, cv2.COLOR_BGR2LAB).astype(np.float32)
-        yy, xx = np.ogrid[:height, :width]
-        distance = np.hypot(xx - cue[0], yy - cue[1])
-        ring = (distance > cue[2] * 1.8) & (distance < cue[2] * 3)
-        if np.any(ring):
-            felt_color = np.median(lab[ring], axis=0)
-            felt = (np.linalg.norm(lab - felt_color, axis=2) < 28).astype(np.uint8) * 255
-            felt = cv2.morphologyEx(felt, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
-            contours, _ = cv2.findContours(felt, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                hull = cv2.convexHull(max(contours, key=cv2.contourArea))
-                if (cv2.contourArea(hull) > gray.size * 0.1
-                        and cv2.pointPolygonTest(hull, cue[:2], False) >= 0):
-                    table[:] = 0
-                    cv2.fillConvexPoly(table, hull, 255)
-                    table = cv2.erode(table, np.ones((9, 9), np.uint8))
-
     # A more sensitive circle pass covers different ball sizes in perspective.
+    # Remove the background before Hough detection, not just after detection.
+    padding = max(2, round(cue[2] * 0.2))
+    circle_search = cv2.dilate(table, np.ones((padding * 2 + 1, padding * 2 + 1), np.uint8))
+    gray[circle_search == 0] = int(np.median(gray[table > 0]))
     gray = cv2.medianBlur(gray, 5)
     circles = cv2.HoughCircles(
         gray, cv2.HOUGH_GRADIENT, dp=1.2,
@@ -107,7 +241,8 @@ def detect_balls(image_path, return_table=False):
     if circles is not None:
         for x, y, radius in circles[0]:
             if (0 <= int(y) < height and 0 <= int(x) < width
-                    and table[int(y), int(x)]
+                    and ball_inside_surface(interior_distance, (x, y, radius))
+                    and ball_appearance_supported(lab, table, (x, y, radius), felt_chroma)
                     and math.hypot(x - cue[0], y - cue[1]) > 0.9 * (cue[2] + radius)
                     and all(math.hypot(x - b[0], y - b[1]) > 0.9 * (radius + b[2])
                             for b in others)):
@@ -453,18 +588,23 @@ def top_down_table(balls, rails, pockets):
         return cv2.perspectiveTransform(np.float32([points]), transform)[0]
 
     centers = project(np.asarray(balls)[:, :2])
-    radii = []
-    for ball, center in zip(balls, centers):
-        x, y, radius = map(float, ball)
-        offsets = project([[x + radius, y], [x - radius, y],
-                           [x, y + radius], [x, y - radius]])
-        radii.append(np.mean(np.linalg.norm(offsets - center, axis=1)))
-    # Balls have equal physical sizes in the rectified view.
-    radius = float(np.median(radii)) if radii else 8.0
+    # All top-down balls, including ghosts, use the specified physical ratio.
+    radius = 400 / 19.55555 / 2
     side_edges = (0, 2) if long_edge % 2 == 0 else (1, 3)
     # Keep P5/P6 ordering consistent with the photographed view.
     sides = [(destination[i] + destination[(i + 1) % 4]) / 2 for i in side_edges]
+    allowed_corners = [dict(x=radius if p[0] == 0 else 800 - radius,
+                            y=radius if p[1] == 0 else 400 - radius) for p in destination]
+    allowed_middle = [dict(x=float(p[0]), y=radius * 0.5 if p[1] == 0 else 400 - radius * 0.5)
+                      for p in sides]
+    allowed_pockets = allowed_corners + allowed_middle
+    inverse = cv2.getPerspectiveTransform(destination, corners)
+    photo_allowed = cv2.perspectiveTransform(
+        np.float32([[[p['x'], p['y']] for p in allowed_pockets]]), inverse)[0]
     return dict(width=800, height=400, radius=radius,
+                allowed_corners=allowed_corners, allowed_middle=allowed_middle,
+                allowed_pockets=allowed_pockets,
+                photo_allowed_pockets=[dict(x=float(p[0]), y=float(p[1])) for p in photo_allowed],
                 balls=[dict(x=float(p[0]), y=float(p[1])) for p in centers],
                 pockets=[dict(x=float(p[0]), y=float(p[1]))
                          for p in list(destination) + sides])
@@ -484,7 +624,9 @@ def enumerate_shots(balls, pockets, overhead=None):
     shots = []
     angle_balls = (np.array([[b['x'], b['y']] for b in overhead['balls']])
                    if overhead is not None else np.asarray(balls)[:, :2])
-    angle_pockets = (np.array([[p['x'], p['y']] for p in overhead['pockets']])
+    angle_pockets = (np.array([[p['x'], p['y']] for p in overhead['allowed_pockets']])
+                     if overhead is not None else np.asarray(pockets))
+    photo_pockets = (np.array([[p['x'], p['y']] for p in overhead['photo_allowed_pockets']])
                      if overhead is not None else np.asarray(pockets))
     cue = np.asarray(angle_balls[0], dtype=float)
     for target_index, ball in enumerate(balls[1:], start=1):
@@ -515,7 +657,8 @@ def enumerate_shots(balls, pockets, overhead=None):
                         np.dot(cue_direction, outgoing) / ghost_denominator, -1, 1))))
                     side = cue_direction[0] * outgoing[1] - cue_direction[1] * outgoing[0]
                     overlap = cue_view_overlap(ghost_angle, side)
-            label = target + (np.asarray(pocket, dtype=float) - target) * 0.28
+            photo_endpoint = photo_pockets[pocket_index]
+            label = target + (photo_endpoint - target) * 0.28
             shots.append(dict(number=len(shots) + 1, target=target_index,
                               pocket=pocket_index + 1, angle=angle, ghost_angle=ghost_angle,
                               cue_view=overlap,
@@ -525,7 +668,7 @@ def enumerate_shots(balls, pockets, overhead=None):
                               ghost_x=float(ghost[0]) if ghost is not None else None,
                               ghost_y=float(ghost[1]) if ghost is not None else None,
                               x=int(target[0]), y=int(target[1]),
-                              px=int(pocket[0]), py=int(pocket[1]),
+                              px=float(photo_endpoint[0]), py=float(photo_endpoint[1]),
                               label_x=float(label[0]), label_y=float(label[1])))
     return shots
 
@@ -562,6 +705,7 @@ def upload():
     finally:
         # The original is no longer needed once loaded; keep only the result.
         if os.path.exists(input_path):
+
             os.remove(input_path)
 
     if len(circles) < 2:
@@ -569,8 +713,6 @@ def upload():
 
     # Detection returns the white cue ball first, then other balls by distance.
     cue_ball = (circles[0][0], circles[0][1])
-    shot = easiest_shot(circles, rails, pockets)
-    angle = calculate_angle(cue_ball, shot['ghost']) if shot else None
 
     # Draw circles and line on the image
     overhead = top_down_table(circles, rails, pockets)
@@ -584,17 +726,8 @@ def upload():
     # Draw cue ball in green
     cv2.circle(img, cue_ball, circles[0][2], (0,255,0), 15)
     # Draw every other detected ball in red, using the same bold outline.
-    for index, (x, y, radius) in enumerate(circles[1:], start=1):
-        color = (255, 0, 255) if shot and index == shot['ball_index'] else (0, 0, 255)
-        cv2.circle(img, (int(x), int(y)), int(radius), color, 15)
-    if shot:
-        target_ball = tuple(map(int, circles[shot['ball_index']][:2]))
-        target_radius = int(circles[shot['ball_index']][2])
-        cv2.drawMarker(img, target_ball, (255, 0, 255), cv2.MARKER_CROSS,
-                       max(3, round(target_radius * 1.2)),
-                       max(1, min(15, target_radius // 4)), cv2.LINE_AA)
-        cv2.line(img, cue_ball, shot['ghost'], (255, 0, 0), 8, cv2.LINE_AA)
-        cv2.line(img, target_ball, pockets[shot['pocket_index']], (255, 0, 255), 8, cv2.LINE_AA)
+    for x, y, radius in circles[1:]:
+        cv2.circle(img, (int(x), int(y)), int(radius), (0, 0, 255), 15)
 
     # Yellow crosses distinguish pocket locations from ball outlines.
     marker_size = max(24, round(max(img.shape[:2]) * 0.012))
@@ -602,18 +735,12 @@ def upload():
         cv2.drawMarker(img, pocket, (0, 255, 255), cv2.MARKER_CROSS,
                        marker_size, 15, cv2.LINE_AA)
 
-    # Put angle text on image
-    cv2.putText(
-        img, f'Shoot Angle: {angle:.1f} deg' if shot else 'No clear direct pocket shot found',
-        (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3
-    )
-
     output_path = os.path.join(UPLOAD_FOLDER, output_filename)
     if not cv2.imwrite(output_path, img):
         raise RuntimeError("Could not save the analyzed image")
 
     # Render template with result image and angle
-    return render_template('results.html', angle=angle, shot=shot, image_file=output_filename,
+    return render_template('results.html', image_file=output_filename,
                            possible_shots=possible_shots, overhead=overhead, circles=circles.tolist(),
                            pockets=pockets, image_width=img.shape[1], image_height=img.shape[0],
                            overlay_font=max(12, img.shape[1] * 0.015),

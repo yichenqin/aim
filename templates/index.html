@@ -2,14 +2,34 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pool Shot Assistant</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 24px 16px; font-family: sans-serif; font-size: 16px; line-height: 1.5; color: #202b3b; background: #f5f7fa; }
+        main { width: 100%; max-width: 560px; margin: 40px auto; padding: 28px; background: #fff; border: 1px solid #dbe1e8; border-radius: 12px; }
+        h1 { margin-top: 0; font-size: clamp(1.6rem, 6vw, 2rem); line-height: 1.2; }
+        label { display: block; margin-bottom: 12px; font-weight: bold; }
+        input[type="file"] { display: block; width: 100%; min-width: 0; padding: 12px; border: 1px solid #b9c4d1; border-radius: 8px; font: inherit; background: #fafbfd; }
+        input::file-selector-button { min-height: 44px; margin-right: 8px; padding: 8px 12px; border: 1px solid #b9c4d1; border-radius: 6px; font: inherit; cursor: pointer; }
+        button { width: 100%; min-height: 48px; margin-top: 20px; padding: 12px; border: 0; border-radius: 8px; color: #fff; background: #1856a0; font: inherit; font-weight: bold; cursor: pointer; touch-action: manipulation; }
+        button:hover { background: #12437e; }
+        input:focus-visible, button:focus-visible { outline: 3px solid #1685ff; outline-offset: 3px; }
+        .hint { color: #536174; font-size: 14px; }
+        @media (max-width: 600px) {
+            main { margin: 12px auto; padding: 20px 16px; }
+        }
+    </style>
 </head>
 <body>
+    <main>
     <h1>Pool Shot Assistant</h1>
     <form action="/upload" method="post" enctype="multipart/form-data">
-        <label for="image" style="display: block; margin-bottom: 8px;">upload a pool table image</label>
-        <input id="image" type="file" name="image" accept="image/*" required />
+        <label for="image">upload a pool table image</label>
+        <input id="image" type="file" name="image" accept="image/*" aria-describedby="upload-hint" required />
+        <p class="hint" id="upload-hint">Choose a photo showing the whole playing surface and all four rails. Maximum upload size: 20 MB.</p>
         <button type="submit">analyze</button>
     </form>
+    </main>
 </body>
 </html>

@@ -33,7 +33,8 @@ class ShotCombinationTests(unittest.TestCase):
 
     def test_ghost_tangency_direction_and_distinct_angle(self):
         overhead = dict(radius=10, balls=[dict(x=100, y=200), dict(x=300, y=100)],
-                        pockets=[dict(x=700, y=100)])
+                        allowed_pockets=[dict(x=700, y=100)],
+                        photo_allowed_pockets=[dict(x=2, y=2)])
         shot = enumerate_shots([[0, 0, 1], [1, 1, 1]], [(2, 2)], overhead)[0]
         self.assertEqual((shot['ghost_x'], shot['ghost_y']), (280, 100))
         self.assertAlmostEqual(shot['angle'], np.degrees(np.arctan2(100, 200)))
@@ -67,7 +68,7 @@ class ShotCombinationTests(unittest.TestCase):
         self.assertAlmostEqual(corrected[0]['angle'], 90, places=3)
         self.assertGreater(abs(original[0]['angle'] - 90), 1)
         self.assertEqual(corrected[0]['x'], original[0]['x'])
-        self.assertEqual(corrected[0]['label_x'], original[0]['label_x'])
+        self.assertNotEqual(corrected[0]['label_x'], original[0]['label_x'])
 
 
 if __name__ == '__main__':
