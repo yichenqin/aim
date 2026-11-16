@@ -692,7 +692,7 @@ def upload_page():
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    file = request.files.get('image')
+    file = request.files.get('image') or request.files.get('camera_image')
     if not file:
         return "No file uploaded", 400
 

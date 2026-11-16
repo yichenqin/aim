@@ -14,6 +14,22 @@ import app as module
 
 
 class UploadIsolationTests(unittest.TestCase):
+    def test_camera_photo_uploads_when_gallery_field_is_empty(self):
+        image = np.full((100, 100, 3), 150, np.uint8)
+        _, encoded = cv2.imencode('.jpg', image)
+        detection = (np.array([[30, 30, 8], [65, 65, 8]]), image,
+                     np.full(image.shape[:2], 255, np.uint8), 1)
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(module, 'UPLOAD_FOLDER', folder), \
+                patch.object(module, 'detect_balls', return_value=detection):
+            client = module.app.test_client()
+            response = client.post('/upload', data={
+                'image': (io.BytesIO(b''), ''),
+                'camera_image': (io.BytesIO(encoded.tobytes()), 'camera.jpg')})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(len(list(Path(folder).glob('*_output.jpg'))), 1)
+            self.assertIn(b'capture="environment"', client.get('/').data)
+
     def test_result_photo_is_downscaled_with_original_overlay_coordinates(self):
         image = np.full((1800, 3200, 3), 150, np.uint8)
         circles = np.array([[800, 450, 40], [2000, 900, 40]])
