@@ -742,7 +742,15 @@ def upload():
                        marker_size, 15, cv2.LINE_AA)
 
     output_path = os.path.join(UPLOAD_FOLDER, output_filename)
-    if not cv2.imwrite(output_path, img):
+    # Keep the SVG's original coordinate system so its labels and shot lines
+    # align, while serving a smaller raster inside that viewBox.
+    preview_scale = min(1.0, 800 / max(img.shape[:2]))
+    preview = img
+    if preview_scale < 1:
+        preview = cv2.resize(img, (round(img.shape[1] * preview_scale),
+                                   round(img.shape[0] * preview_scale)),
+                             interpolation=cv2.INTER_AREA)
+    if not cv2.imwrite(output_path, preview, [cv2.IMWRITE_JPEG_QUALITY, 80]):
         raise RuntimeError("Could not save the analyzed image")
 
     # Render template with result image and angle

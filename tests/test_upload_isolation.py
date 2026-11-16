@@ -14,6 +14,30 @@ import app as module
 
 
 class UploadIsolationTests(unittest.TestCase):
+    def test_result_photo_is_downscaled_with_original_overlay_coordinates(self):
+        image = np.full((1800, 3200, 3), 150, np.uint8)
+        circles = np.array([[800, 450, 40], [2000, 900, 40]])
+        _, encoded = cv2.imencode('.png', image)
+        detection = (circles, image, np.full(image.shape[:2], 255, np.uint8), 1)
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(module, 'UPLOAD_FOLDER', folder), \
+                patch.object(module, 'detect_balls', return_value=detection):
+            client = module.app.test_client()
+            response = client.post('/upload', data={
+                'image': (io.BytesIO(encoded.tobytes()), 'large.png')})
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            self.assertIn('viewBox="0 0 3200 1800"', html)
+            name = re.search(r'/uploads/([0-9a-f]{32}_output\.jpg)', html).group(1)
+            with client.get('/uploads/' + name) as result:
+                preview = cv2.imdecode(np.frombuffer(result.data, np.uint8), cv2.IMREAD_COLOR)
+            self.assertEqual(preview.shape[:2], (450, 800))
+            # The cue outline remains at its correctly scaled location.
+            green = (preview[:, :, 1] > 180) & (preview[:, :, 0] < 100) & (preview[:, :, 2] < 100)
+            yy, xx = np.nonzero(green)
+            self.assertAlmostEqual(float(xx.mean()), 200, delta=2)
+            self.assertAlmostEqual(float(yy.mean()), 112.5, delta=2)
+
     def test_simultaneous_uploads_keep_separate_results(self):
         barrier = threading.Barrier(2)
         paths = []
