@@ -2,11 +2,257 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
-    <title>Result - Shoot Angle</title>
+    <title>Pool Shot Analysis</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+        body { font-family: sans-serif; margin: 24px; line-height: 1.5; }
+        .diagram { display: block; width: 800px; max-width: 100%; height: auto; }
+        .views { display: flex; align-items: flex-start; gap: 24px; flex-wrap: wrap; }
+        .view { flex: 1 1 520px; max-width: 800px; min-width: 0; margin: 0; }
+        .view h3 { margin: 0 0 8px; }
+        .overhead-label { font-size: 14px; font-weight: bold; fill: #542098; paint-order: stroke; stroke: white; stroke-width: 3px; }
+        .top-path { display: none; }
+        .top-path.active { display: inline; }
+        .path { opacity: .32; }
+        .path.active { opacity: 1; }
+        .path.hidden { display: none; }
+        .shot-label { paint-order: stroke; stroke: white; stroke-width: 5px; fill: #542098; font-weight: bold; }
+        .table-wrap { max-height: 480px; overflow: auto; max-width: 1200px; margin-top: 16px; }
+        .summary-layout { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 24px; }
+        .summary-layout .table-wrap { flex: 1 1 960px; min-width: 0; margin-top: 0; }
+        .overlap-panel { flex: 0 1 440px; min-width: 0; padding: 16px; border: 1px solid #ccc; border-radius: 8px; position: sticky; top: 16px; }
+        .overlap-panel h3 { margin-top: 0; }
+        .overlap-panel svg { display: block; width: 100%; height: auto; }
+        .overlap-panel [hidden] { display: none; }
+        .ghost-key { color: #006b9e; } .target-key { color: #c7293c; }
+        th button { width: 100%; background: none; border: 0; text-align: left; font: inherit; font-weight: bold; }
+        th[aria-sort="ascending"] button::after { content: " \2191"; }
+        th[aria-sort="descending"] button::after { content: " \2193"; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ccc; text-align: left; padding: 6px 12px; }
+        th { position: sticky; top: 0; background: #eee; }
+        tr.selected { background: #f3e5ff; }
+        button { cursor: pointer; padding: 4px 12px; }
+    </style>
 </head>
 <body>
-    <h1>Shoot Angle: {{ angle | round(1) }}°</h1>
-    <img src="{{ url_for('send_image', filename=image_file) }}" alt="Labeled Image" />
+    <h1>Pool Shot Analysis</h1>
+    {% if shot %}
+    <p>Recommended target: magenta circle. Cue ball: green. Other balls: red.</p>
+    <p>Blue line: cue-ball aim toward the contact position. Magenta line: target to pocket.</p>
+    <p>Aim direction: {{ angle | round(1) }}&deg;. Estimated cut angle: {{ shot.cut_angle | round(1) }}&deg;.</p>
+    {% else %}
+    <p>No clear direct pocket shot found among the detected balls and pockets.</p>
+    {% endif %}
+    <p>Estimate based on detected positions, a 2:1 table, and straight shots. Check the detections before shooting.</p>
+    <h2>Numbered shot combinations</h2>
+    <p>Each shot joins the cue ball to a target, then the target to a pocket.
+       Targets are labeled B1, B2, etc.; pockets are P1 through P6.</p>
+    <p>The angle is between cue-to-target and target-to-pocket directions: 0&deg; is straight ahead,
+       90&deg; is a right angle, and 180&deg; reverses direction. Angles are calculated from the corrected 2:1 top-down table coordinates,
+       rather than the original photo. Combinations include blocked and impractical shots.</p>
+    <p>The center-to-center angle uses cue-to-target and target-to-pocket directions.
+       The ghost-ball angle uses cue-to-ghost and target-to-pocket directions.
+       The ghost ball is tangent to the target, on the side opposite the pocket.</p>
+    <p>Click a shot number in the table to show its ghost ball and aiming lines. <button id="show-all" type="button">Show all shots</button></p>
+    <p id="selection-status" aria-live="polite">Showing all {{ possible_shots | length }} shot combinations.</p>
+    <div class="views">
+    <figure class="view">
+    <h3>Original photo</h3>
+    <svg class="diagram" viewBox="0 0 {{ image_width }} {{ image_height }}" role="img" aria-label="Pool table with numbered target-to-pocket combinations">
+        <image href="{{ url_for('send_image', filename=image_file) }}" width="{{ image_width }}" height="{{ image_height }}" />
+        {% for candidate in possible_shots %}
+        <g class="path" data-shot="{{ candidate.number }}">
+            <line x1="{{ circles[0][0] }}" y1="{{ circles[0][1] }}" x2="{{ candidate.x }}" y2="{{ candidate.y }}" stroke="#1685ff" stroke-width="{{ overlay_stroke }}" />
+            <line x1="{{ candidate.x }}" y1="{{ candidate.y }}" x2="{{ candidate.px }}" y2="{{ candidate.py }}" stroke="#ff8b00" stroke-width="{{ overlay_stroke }}" />
+            <text class="shot-label" x="{{ candidate.label_x }}" y="{{ candidate.label_y }}" font-size="{{ overlay_font }}">{{ candidate.number }}</text>
+        </g>
+        {% endfor %}
+        {% for ball in circles[1:] %}
+        <text class="shot-label" x="{{ ball[0] + ball[2] }}" y="{{ ball[1] - ball[2] }}" font-size="{{ overlay_font }}">B{{ loop.index }}</text>
+        {% endfor %}
+        {% for pocket in pockets %}
+        <text class="shot-label" x="{{ pocket[0] }}" y="{{ pocket[1] + overlay_font }}" font-size="{{ overlay_font }}">P{{ loop.index }}</text>
+        {% endfor %}
+    </svg>
+    </figure>
+    <figure class="view">
+    <h3>Top-down table</h3>
+    {% if overhead %}
+    <svg class="diagram" viewBox="-32 -32 864 464" role="img" aria-label="Top-down pool table with a 2 to 1 playing surface, balls, and six pockets">
+        <rect x="0" y="0" width="800" height="400" fill="#c3c7c5" stroke="#00c9d6" stroke-width="4" />
+        {% for candidate in possible_shots %}
+        {% set target = overhead.balls[candidate.target] %}
+        {% set hole = overhead.pockets[candidate.pocket - 1] %}
+        <g class="top-path" data-top-shot="{{ candidate.number }}">
+            <line x1="{{ overhead.balls[0].x }}" y1="{{ overhead.balls[0].y }}" x2="{{ target.x }}" y2="{{ target.y }}" stroke="#1685ff" stroke-width="1" stroke-dasharray="4 4" opacity="0.4" />
+            {% if candidate.ghost_x is not none %}
+            <line x1="{{ overhead.balls[0].x }}" y1="{{ overhead.balls[0].y }}" x2="{{ candidate.ghost_x }}" y2="{{ candidate.ghost_y }}" stroke="#1685ff" stroke-width="2" />
+            <line x1="{{ candidate.ghost_x }}" y1="{{ candidate.ghost_y }}" x2="{{ hole.x }}" y2="{{ hole.y }}" stroke="#ff8b00" stroke-width="2" />
+            <circle class="ghost-ball" cx="{{ candidate.ghost_x }}" cy="{{ candidate.ghost_y }}" r="{{ overhead.radius }}" fill="white" fill-opacity="0.35" stroke="#333" stroke-width="2" stroke-dasharray="4 3" />
+            <text class="overhead-label" x="{{ candidate.ghost_x + overhead.radius + 3 }}" y="{{ candidate.ghost_y + overhead.radius + 14 }}">Ghost {{ candidate.number }}</text>
+            {% endif %}
+        </g>
+        {% endfor %}
+        {% for ball in overhead.balls %}
+        {% set recommended = shot and loop.index0 == shot.ball_index %}
+        {% set color = '#00e000' if loop.first else ('#ff00ff' if recommended else '#ff0000') %}
+        <circle cx="{{ ball.x }}" cy="{{ ball.y }}" r="{{ overhead.radius }}" fill="none" stroke="{{ color }}" stroke-width="3" />
+        {% if recommended %}
+        <path d="M {{ ball.x - overhead.radius * 0.6 }} {{ ball.y }} H {{ ball.x + overhead.radius * 0.6 }} M {{ ball.x }} {{ ball.y - overhead.radius * 0.6 }} V {{ ball.y + overhead.radius * 0.6 }}" stroke="#ff00ff" stroke-width="3" />
+        {% endif %}
+        <text class="overhead-label" x="{{ ball.x + overhead.radius + 3 }}" y="{{ ball.y - overhead.radius - 3 }}">{{ 'Cue' if loop.first else 'B' ~ loop.index0 }}</text>
+        {% endfor %}
+        {% for hole in overhead.pockets %}
+        <path d="M {{ hole.x - 9 }} {{ hole.y }} H {{ hole.x + 9 }} M {{ hole.x }} {{ hole.y - 9 }} V {{ hole.y + 9 }}" stroke="#ffff00" stroke-width="3" />
+        <text class="overhead-label" x="{{ hole.x + 10 }}" y="{{ hole.y + 18 }}">P{{ loop.index }}</text>
+        {% endfor %}
+    </svg>
+    <figcaption>2:1 playing surface; cyan rails, green cue ball, red targets, yellow pocket crosses. The recommended target is magenta with a cross. Select a shot below to see a dashed ghost ball, a blue cue-to-ghost line, and an orange target direction. Positions depend on the detected rails and balls.</figcaption>
+    {% else %}
+    <p>The top-down view needs four detected rails and six pockets. Try another photo.</p>
+    {% endif %}
+    </figure>
+    </div>
+    {% if possible_shots %}
+    <div class="summary-layout">
+    <div class="table-wrap">
+        <p>Showing shots with a ghost-ball angle of 90&deg; or less.</p>
+        <p>Distances use top-down diagram units (long rail = 800, short rail = 400). Click any column header to sort; click again to reverse.</p>
+        <table id="shot-table">
+            <thead><tr>
+                {% for key, label in [('number', 'Shot'), ('target', 'Target'), ('pocket', 'Pocket'), ('angle', 'Center-to-center angle (top-down)'), ('ghost_angle', 'Ghost-ball angle (top-down)'), ('cue_distance', 'Cue to ghost distance'), ('target_distance', 'Target to pocket distance'), ('total_distance', 'Total distance')] %}
+                <th scope="col" aria-sort="{{ 'ascending' if key == 'number' else 'none' }}"><button type="button" data-sort="{{ key }}">{{ label }}</button></th>
+                {% endfor %}
+            </tr></thead>
+            <tbody id="shot-rows">
+            {% for candidate in possible_shots if candidate.ghost_angle is not none and candidate.ghost_angle <= 90 %}
+            <tr data-row="{{ candidate.number }}">
+                <td><button type="button" data-select="{{ candidate.number }}" aria-label="Show shot {{ candidate.number }}">{{ candidate.number }}</button></td>
+                <td>B{{ candidate.target }}</td><td>P{{ candidate.pocket }}</td>
+                <td>{% if candidate.angle is not none %}{{ candidate.angle | round(1) }}&deg;{% else %}Undefined{% endif %}</td>
+                <td>{% if candidate.ghost_angle is not none %}{{ candidate.ghost_angle | round(1) }}&deg;{% else %}Undefined{% endif %}</td>
+                {% for value in [candidate.cue_distance, candidate.target_distance, candidate.total_distance] %}
+                <td>{{ value | round(1) if value is not none else 'Undefined' }}</td>
+                {% endfor %}
+            </tr>
+            {% else %}
+            <tr><td colspan="8">No shots have a defined ghost-ball angle of 90&deg; or less.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <aside class="overlap-panel" aria-labelledby="overlap-title">
+        <h3 id="overlap-title">View along the cue direction</h3>
+        <p id="overlap-status" aria-live="polite">Select a shot number to see its ghost-ball and target-ball overlap.</p>
+        <div id="overlap-content" hidden>
+            <svg viewBox="0 0 440 250" role="img" aria-labelledby="overlap-svg-title">
+                <title id="overlap-svg-title">Ghost and target ball overlap for the selected shot</title>
+                <defs><clipPath id="ghost-clip"><circle id="overlap-clip-circle" cx="220" cy="120" r="70" /></clipPath></defs>
+                <line x1="35" y1="120" x2="405" y2="120" stroke="#ccc" stroke-dasharray="4 4" />
+                <circle id="overlap-ghost-fill" cx="220" cy="120" r="70" fill="#59b9ed" fill-opacity="0.45" />
+                <circle id="overlap-target-fill" cx="220" cy="120" r="70" fill="#f36a79" fill-opacity="0.45" />
+                <circle id="overlap-intersection" cx="220" cy="120" r="70" fill="#9357bf" fill-opacity="0.65" clip-path="url(#ghost-clip)" />
+                <circle id="overlap-ghost-outline" cx="220" cy="120" r="70" fill="none" stroke="#006b9e" stroke-width="3" stroke-dasharray="7 4" />
+                <circle id="overlap-target-outline" cx="220" cy="120" r="70" fill="none" stroke="#c7293c" stroke-width="3" />
+                <circle id="overlap-ghost-center" cx="220" cy="120" r="3" fill="#006b9e" />
+                <circle id="overlap-target-center" cx="220" cy="120" r="3" fill="#c7293c" />
+                <text x="220" y="225" text-anchor="middle" font-size="15" fill="#333">Looking along cue ball ? ghost ball</text>
+            </svg>
+            <p><span class="ghost-key">Blue dashed circle: ghost ball.</span> <span class="target-key">Red circle: target ball.</span> Purple: shared area.</p>
+            <p id="overlap-metrics"></p>
+            <p><strong>Formula:</strong> Horizontal overlap (%) = 100 &times; (1 &minus; sin(&theta;)), where &theta; is the ghost-ball cut angle in degrees.</p>
+            <p id="overlap-calculation" aria-live="polite"></p>
+            <p id="overlap-warning" hidden>Over 90&deg;: this target direction cannot be produced by a direct cue-ball hit.</p>
+            <p>This is a percentage of the ball diameter, not its area. At 0&deg; the circles coincide; at 90&deg; they touch. Displayed calculation values are rounded.</p>
+        </div>
+    </aside>
+    </div>
+    {% else %}
+    <p>No combinations available because the top-down table could not be constructed.</p>
+    {% endif %}
+    <script>
+        const shotDetails = {{ possible_shots | tojson }};
+        let sortColumn = 'number';
+        let sortAscending = true;
+        function sortShots(column) {
+            sortAscending = column === sortColumn ? !sortAscending : true;
+            sortColumn = column;
+            const byNumber = new Map(shotDetails.map(shot => [String(shot.number), shot]));
+            const rows = Array.from(document.querySelectorAll('#shot-rows [data-row]'));
+            rows.sort((a, b) => {
+                const left = byNumber.get(a.dataset.row)[column];
+                const right = byNumber.get(b.dataset.row)[column];
+                // Undefined values stay at the bottom in either direction.
+                if (left == null && right == null) return Number(a.dataset.row) - Number(b.dataset.row);
+                if (left == null) return 1;
+                if (right == null) return -1;
+                return (sortAscending ? left - right : right - left)
+                    || Number(a.dataset.row) - Number(b.dataset.row);
+            });
+            const body = document.getElementById('shot-rows');
+            rows.forEach(row => body.appendChild(row));
+            document.querySelectorAll('[data-sort]').forEach(button => {
+                button.parentElement.setAttribute('aria-sort', button.dataset.sort === column
+                    ? (sortAscending ? 'ascending' : 'descending') : 'none');
+            });
+        }
+        document.querySelectorAll('[data-sort]').forEach(button => {
+            button.addEventListener('click', () => sortShots(button.dataset.sort));
+        });
+        function updateOverlap(number) {
+            const status = document.getElementById('overlap-status');
+            if (!status) return;
+            const content = document.getElementById('overlap-content');
+            const shot = shotDetails.find(candidate => String(candidate.number) === number);
+            if (!shot || !shot.cue_view) {
+                content.hidden = true;
+                status.textContent = shot ? 'This shot has an undefined cue direction.'
+                    : 'Select a shot number to see its ghost-ball and target-ball overlap.';
+                return;
+            }
+            content.hidden = false;
+            status.textContent = 'Shot ' + shot.number + ' ? B' + shot.target + ' ? P' + shot.pocket;
+            const separation = 140 * shot.cue_view.offset;
+            const ghostX = 220 - separation / 2;
+            const targetX = 220 + separation / 2;
+            ['overlap-clip-circle', 'overlap-ghost-fill', 'overlap-ghost-outline', 'overlap-ghost-center'].forEach(id => {
+                document.getElementById(id).setAttribute('cx', ghostX);
+            });
+            ['overlap-target-fill', 'overlap-target-outline', 'overlap-target-center', 'overlap-intersection'].forEach(id => {
+                document.getElementById(id).setAttribute('cx', targetX);
+            });
+            document.getElementById('overlap-metrics').textContent = 'Ghost-ball angle: '
+                + shot.ghost_angle.toFixed(1) + '\u00b0 | Horizontal overlap: '
+                + (100 * shot.cue_view.overlap).toFixed(1) + '% | Center offset: '
+                + (100 * Math.abs(shot.cue_view.offset)).toFixed(1) + '% of diameter.';
+            const sine = Math.sin(shot.ghost_angle * Math.PI / 180);
+            document.getElementById('overlap-calculation').textContent =
+                'For this shot: 100 \u00d7 (1 \u2212 sin(' + shot.ghost_angle.toFixed(4)
+                + '\u00b0)) \u2248 100 \u00d7 (1 \u2212 ' + sine.toFixed(6)
+                + ') \u2248 ' + (100 * shot.cue_view.overlap).toFixed(2) + '%.';
+            document.getElementById('overlap-warning').hidden = shot.cue_view.feasible;
+        }
+        function selectShot(number) {
+            updateOverlap(number);
+            document.querySelectorAll('[data-shot]').forEach(path => {
+                path.classList.toggle('hidden', number !== null && path.dataset.shot !== number);
+                path.classList.toggle('active', number !== null && path.dataset.shot === number);
+            });
+            document.querySelectorAll('[data-top-shot]').forEach(path => {
+                path.classList.toggle('active', number !== null && path.dataset.topShot === number);
+            });
+            document.querySelectorAll('[data-row]').forEach(row => {
+                row.classList.toggle('selected', row.dataset.row === number);
+            });
+            document.getElementById('selection-status').textContent = number === null
+                ? 'Showing all {{ possible_shots | length }} shot combinations.' : 'Showing shot ' + number + '.';
+        }
+        document.querySelectorAll('[data-select]').forEach(button => {
+            button.addEventListener('click', () => selectShot(button.dataset.select));
+        });
+        document.getElementById('show-all').addEventListener('click', () => selectShot(null));
+    </script>
     <br/>
     <a href="/">Try Another Image</a>
 </body>

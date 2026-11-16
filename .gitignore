@@ -1,1 +1,11 @@
 /app_venv
+/.venv/
+/venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+!.env.example
+/uploads/
+/marked_pool_table.jpg

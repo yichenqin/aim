@@ -2,13 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
-    <title>Pool Shoot Angle Detector</title>
+    <title>Pool Shot Assistant</title>
 </head>
 <body>
-    <h1>Upload a Pool Table Image</h1>
+    <h1>Pool Shot Assistant</h1>
     <form action="/upload" method="post" enctype="multipart/form-data">
-        <input type="file" name="image" accept="image/*" required />
-        <button type="submit">Upload & Detect Angle</button>
+        <label for="image" style="display: block; margin-bottom: 8px;">upload a pool table image</label>
+        <input id="image" type="file" name="image" accept="image/*" required />
+        <button type="submit">analyze</button>
     </form>
 </body>
 </html>
